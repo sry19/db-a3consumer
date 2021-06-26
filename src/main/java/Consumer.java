@@ -1,3 +1,15 @@
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.client.builder.AwsClientBuilder;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
+import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
+import com.amazonaws.services.dynamodbv2.document.DynamoDB;
+import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.dynamodbv2.document.UpdateItemOutcome;
+import com.amazonaws.services.dynamodbv2.document.spec.UpdateItemSpec;
+import com.amazonaws.services.dynamodbv2.document.utils.NameMap;
+import com.amazonaws.services.dynamodbv2.document.utils.ValueMap;
+import com.amazonaws.services.dynamodbv2.model.ReturnValue;
 import com.google.common.util.concurrent.AtomicLongMap;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -10,6 +22,7 @@ import java.util.logging.Logger;
 
 public class Consumer {
   private final static String QUEUE_NAME = "threadExQ";
+  private final static int port = 8000;
 
   public static void main(String[] argv) throws Exception {
     int numOfThreads = Integer.parseInt(argv[0]);
@@ -21,7 +34,12 @@ public class Consumer {
     factory.setPassword("pass1");
     final Connection connection = factory.newConnection();
 
-    AtomicLongMap<String> atomicLongMap = AtomicLongMap.create();
+    AmazonDynamoDB client = AmazonDynamoDBClientBuilder
+        .standard()
+        .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration("dynamodb.us-east-1.amazonaws.com", "us-east-1"))
+        .build();
+    DynamoDB dynamoDB = new DynamoDB(client);
+    Table table = dynamoDB.getTable("countTable");
 
     Runnable runnable = new Runnable() {
       @Override
@@ -36,7 +54,10 @@ public class Consumer {
           DeliverCallback deliverCallback = (consumerTag, delivery) -> {
             String message = new String(delivery.getBody(), "UTF-8");
             String[] pair = message.split(" ");
-            atomicLongMap.addAndGet(pair[0],Long.parseLong(pair[1]));
+            if (!pair[0].equals("")) {
+              handler(table, pair[0], Long.parseLong(pair[1]));
+            }
+
             channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
             //System.out.println( "Callback thread ID = " + Thread.currentThread().getId() + " Received '" + message + "'");
           };
@@ -51,6 +72,23 @@ public class Consumer {
     for (int i=0; i<numOfThreads; i++) {
       Thread thread = new Thread(runnable);
       thread.start();
+    }
+
+  }
+
+  private static void handler(Table table, String word, Long count) {
+    UpdateItemSpec updateItemSpec = new UpdateItemSpec().withPrimaryKey("word", word)
+        .withUpdateExpression("set counterme = if_not_exists(counterme, :start) + :val")
+        .withValueMap(new ValueMap().withNumber(":val", count).withNumber(":start",0)).withReturnValues(ReturnValue.UPDATED_NEW);
+
+    try {
+      System.out.println("Incrementing an atomic counter...");
+      UpdateItemOutcome outcome = table.updateItem(updateItemSpec);
+      System.out.println("UpdateItem succeeded:\n" + outcome.getItem().toJSONPretty());
+    }
+    catch (Exception e) {
+      System.err.println("Unable to update item: " + word + " " + count);
+      System.err.println(e.getMessage());
     }
 
   }
